@@ -2,91 +2,116 @@ require 'adamantium'
 require 'anima'
 require 'variable'
 
-class MCake
-  include Adamantium::Flat, Anima.new(:targets, :results)
+module MCake
+  require 'mcake/type_check'
 
-  def self.empty
-    new(targets: {}, results: {})
+  class Result
+    include Adamantium, Anima.new(:value, :dependencies), TypeCheck
+
+    def initialize(*)
+      super
+
+      assert_attributee_type(:dependencies, Hash)
+    end
+
+    def dependency(name)
+      dependencies.fetch(name)
+    end
   end
 
-  class Target
-    include Adamantium, Anima.new(:block, :dependencies, :name)
-  end # Target
+  class State
+    include Adamantium::Flat, Anima.new(:targets), TypeCheck
 
-  def add_target_block(name, &block)
-    dependencies = block.parameters.map do |type, parameter_name|
-      unless type.equal?(:keyreq)
-        fail "Target: #{name} "                                 \
-             "block #{block} "                                  \
-             "has invalid parameter #{parameter_name.inspect} " \
-             "of type: #{type} "                                \
-             "expected :keyreq"
+    def initialize(*)
+      super
+
+      assert_attribute_type(:targets, Hash)
+    end
+
+    def add_target(target)
+      name = target.name
+
+      fail "Target name: #{name} is alread registered" if targets.key?(name)
+
+      target.dependencies.each do |dependency_name|
+        targets.fetch(dependency_name) do
+          fail "Target: #{name} has unknown dependency: #{dependency_name}"
+        end
       end
 
-      parameter_name
+      targets[name] = target
+
+      self
     end
 
-    add_target(name, dependencies, block)
-  end
+    def build(name)
+      assert_type(name, :name, Name)
 
-  def add_target_method(name, method)
-    dependencies = method.parameters.map do |type, parameter_name|
-      unless type.equal?(:keyreq)
-        fail "Target: #{name} "                                 \
-             "method: #{method.name} "                          \
-             "has invalid parameter #{parameter_name.inspect} " \
-             "of type: #{type} "                                \
-             "expected :keyreq"
-      end
+      target = targets.fetch(name) { fail ArgumentError, "Unknown target: #{name}" }
 
-      parameter_name
+      dependencies = target
+        .dependencies
+        .to_h { |dependency| [dependency.name, build_target(dependency.name)] }
+        .transform_values(&:value)
+
+      fail
     end
-
-    add_target(name, dependencies, method)
-  end
-
-  def add_target(name, dependencies, block)
-    if targets.key?(name)
-      fail "Target: #{name} already exists"
-    end
-
-    dependencies = dependencies.map do |dependency_name|
-      targets.fetch(dependency_name) do
-        fail "Target: #{name} has unknown dependency: #{dependency_name}"
-      end
-    end
-
-    with(
-      targets: targets.merge(name => Target.new(block:, dependencies:, name:)),
-      results: results.merge(name => new_ivar)
-    )
-  end
-
-  def build(name)
-    build_target(name).value
-  end
 
   private
 
-  def new_ivar
-    Variable::IVar.new(condition_variable: ConditionVariable, mutex: Mutex)
+    def new_ivar
+      Variable::IVar.new(condition_variable: ConditionVariable, mutex: Mutex)
+    end
+  end # State
+
+  class Name
+    include Adamantium, Anima.new(:members), TypeCheck
+
+    ALLOWED_MEMBERS = [Symbol, String, Integer].to_set.freeze
+
+    private_constant(*constants(false))
+
+    def self.build(member)
+      new(members: [member])
+    end
+
+    def initialize(*)
+      super
+
+      assert_array_types(:members, ALLOWED_MEMBERS)
+
+      fail ArgumentError, 'Name members cannot be empty' if members.empty?
+    end
+
+    def to_s
+      members.join('-')
+    end
+
+    def extend(members)
+      Name.new(members: component + members)
+    end
+
+    def keyword_argument?
+      members.length.equal?(1) && members.fetch(0).instance_of?(Symbol)
+    end
+  end # Name
+
+  def self.empty
+    State.new(targets: {})
   end
 
-  def build_target(name)
-    results
-      .fetch(name)
-      .populate_with do
-        Thread.new do
-          target = targets.fetch(name)
-          target.block.call(**build_dependencies(target))
-        end
-      end
+  class Target
+    include Adamantium, Anima.new(:block, :dependencies, :name), TypeCheck
+
+    def initialize(attributes)
+      super(attributes)
+
+      assert_attribute_type(:block, Proc)
+    end
+  end # Target
+
+  def self.name(name)
+    Name.new(members: [name])
   end
 
-  def build_dependencies(target)
-    target
-      .dependencies
-      .to_h { |dependency| [dependency.name, build_target(dependency.name)] }
-      .transform_values(&:value)
-  end
 end # MCake
